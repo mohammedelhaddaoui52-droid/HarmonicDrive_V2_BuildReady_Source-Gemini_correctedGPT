@@ -76,15 +76,15 @@ jobs:
           import pathlib, re, sys
           text = pathlib.Path(sys.argv[1]).read_text(errors="replace")
           minimum = None
-          sections = re.split(r"(?=Load command \\d+)", text)
+          sections = re.split(r"(?=Load command \d+)", text)
           for section in sections:
               if "cmd LC_BUILD_VERSION" in section:
-                  m = re.search(r"\\bminos\\s+(\\d+(?:\\.\\d+){1,2})", section)
+                  m = re.search(r"\bminos\s+(\d+(?:\.\d+){1,2})", section)
                   if m:
                       minimum = m.group(1)
                       break
               elif "cmd LC_VERSION_MIN_MACOSX" in section:
-                  m = re.search(r"\\bversion\\s+(\\d+(?:\\.\\d+){1,2})", section)
+                  m = re.search(r"\bversion\s+(\d+(?:\.\d+){1,2})", section)
                   if m:
                       minimum = m.group(1)
                       break
