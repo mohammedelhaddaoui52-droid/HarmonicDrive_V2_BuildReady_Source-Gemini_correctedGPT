@@ -1,0 +1,138 @@
+name: Build Harmonic Drive V2 VST3 (macOS Intel / Mojave)
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-macos-intel:
+    name: Compile and verify Intel VST3 for macOS 10.14+
+    runs-on: macos-15-intel
+    timeout-minutes: 60
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Unpack build-ready source ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP_FILE="$(find . -maxdepth 1 -type f -name '*.zip' -print -quit)"
+          test -n "$ZIP_FILE"
+          mkdir -p unpacked
+          unzip -oq "$ZIP_FILE" -d unpacked
+          PROJECT_CMAKE="$(find unpacked -name CMakeLists.txt -print -quit)"
+          test -n "$PROJECT_CMAKE"
+          PROJECT_DIR="$(dirname "$PROJECT_CMAKE")"
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          echo "Project files:"
+          find "$PROJECT_DIR" -maxdepth 1 -type f -print
+          for f in PluginProcessor.cpp PluginProcessor.h PluginEditor.cpp PluginEditor.h HeatSaturatorCore.h CaptureCurves.h; do
+            test -s "$PROJECT_DIR/$f"
+          done
+
+      - name: Show build toolchain
+        run: |
+          sw_vers
+          xcodebuild -version
+          cmake --version
+          clang++ --version
+
+      - name: Fetch JUCE 8.0.13
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch 8.0.13 https://github.com/juce-framework/JUCE.git juce-v8
+          test -f juce-v8/CMakeLists.txt
+
+      - name: Configure Intel VST3 with Mojave deployment target
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S "$PROJECT_DIR" -B build-macos-vst3             -DJUCE_DIR="$PWD/juce-v8"             -DCMAKE_BUILD_TYPE=Release             -DCMAKE_CXX_STANDARD=17             -DCMAKE_OSX_DEPLOYMENT_TARGET=10.14             -DCMAKE_OSX_ARCHITECTURES=x86_64
+
+      - name: Compile VST3
+        run: cmake --build build-macos-vst3 --config Release --target HarmonicDrive_VST3 --parallel 3
+
+      - name: Verify bundle, architecture and minimum macOS
+        shell: bash
+        run: |
+          set -euo pipefail
+          PLUGIN="$(find build-macos-vst3 -type d -name '*.vst3' -print -quit)"
+          test -n "$PLUGIN"
+          BINARY="$(find "$PLUGIN" -type f -path '*/Contents/MacOS/*' -print -quit)"
+          test -n "$BINARY"
+          file "$BINARY"
+          lipo "$BINARY" -verify_arch x86_64
+          otool -l "$BINARY" > build-macos-vst3/load-commands.txt
+          python3 - build-macos-vst3/load-commands.txt <<'PY'
+          import pathlib, re, sys
+          text = pathlib.Path(sys.argv[1]).read_text(errors="replace")
+          minimum = None
+          sections = re.split(r"(?=Load command \\d+)", text)
+          for section in sections:
+              if "cmd LC_BUILD_VERSION" in section:
+                  m = re.search(r"\\bminos\\s+(\\d+(?:\\.\\d+){1,2})", section)
+                  if m:
+                      minimum = m.group(1)
+                      break
+              elif "cmd LC_VERSION_MIN_MACOSX" in section:
+                  m = re.search(r"\\bversion\\s+(\\d+(?:\\.\\d+){1,2})", section)
+                  if m:
+                      minimum = m.group(1)
+                      break
+          if minimum is None:
+              raise SystemExit("FAIL: Could not identify Mach-O minimum macOS version.")
+          nums = tuple(int(x) for x in minimum.split("."))
+          nums += (0,) * (3 - len(nums))
+          if nums[:2] > (10, 14):
+              raise SystemExit(f"FAIL: minimum macOS {minimum} is newer than Mojave 10.14.")
+          print(f"PASS: x86_64 architecture; Mach-O minimum macOS {minimum}")
+          PY
+          echo "$PLUGIN" > plugin-path.txt
+
+      - name: Package installable VST3
+        shell: bash
+        run: |
+          set -euo pipefail
+          PLUGIN="$(cat plugin-path.txt)"
+          mkdir -p dist
+          ditto -c -k --sequesterRsrc --keepParent "$PLUGIN" dist/HarmonicDrive-V2-macOS-Intel-Mojave.zip
+          cat > dist/BUILD-INFO.txt <<EOF
+          Product: Harmonic Drive V2
+          Format: VST3
+          Platform: macOS Intel x86_64
+          Declared minimum OS: macOS 10.14 (Mojave)
+          Build type: Release
+          JUCE: 8.0.13
+          Binary checks: VST3 bundle present, x86_64 architecture verified, Mach-O minimum version inspected.
+          Not verified: real DAW loading/audio runtime on Mojave or audio similarity to Pro Tools HEAT.
+          EOF
+          ls -lh dist
+
+      - name: Upload installable VST3 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: HarmonicDrive-V2-macOS-Intel-Mojave
+          path: |
+            dist/HarmonicDrive-V2-macOS-Intel-Mojave.zip
+            dist/BUILD-INFO.txt
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish downloadable release
+        if: github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: harmonic-drive-v2-gemini-build-${{ github.run_number }}
+          name: Harmonic Drive V2 — macOS Intel Mojave build ${{ github.run_number }}
+          body: |
+            Intel x86_64 VST3 built with JUCE 8.0.13, declaring macOS 10.14 as minimum deployment target.
+            The binary architecture and Mach-O minimum version were checked. Runtime testing in Mojave 10.14.6 and DAW compatibility are still required.
+          files: |
+            dist/HarmonicDrive-V2-macOS-Intel-Mojave.zip
+            dist/BUILD-INFO.txt
